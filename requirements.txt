@@ -1,0 +1,30 @@
+# --- Core app ---
+streamlit>=1.37,<1.41
+groq>=0.11.0,<1.0
+python-dotenv>=1.0.1
+
+# --- NLP / ML stack ---
+sentence-transformers>=3.0.1,<3.2
+transformers>=4.43,<4.47
+tokenizers>=0.15,<0.20
+huggingface-hub>=0.23,<0.25
+safetensors>=0.4,<0.5
+accelerate>=0.33,<0.35    # safe CPU default
+
+# Torch: CPU wheels on Linux (Streamlit Cloud). Skip on macOS if you develop locally there.
+torch==2.2.* ; sys_platform != "darwin"
+
+# --- SciPy stack (compatible pins) ---
+numpy==1.26.4
+scipy==1.11.4
+scikit-learn==1.5.1
+
+# --- PDF parsing ---
+pdfminer.six>=20231228
+
+# --- Database ---
+SQLAlchemy>=2.0.30,<2.1
+psycopg2-binary>=2.9.9
+
+# --- Useful for dependency edges (pulled in transitively, but pin helps avoid build quirks) ---
+typing_extensions>=4.9
