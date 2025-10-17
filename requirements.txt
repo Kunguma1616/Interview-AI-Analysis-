@@ -1,14 +1,15 @@
 # --- Core app ---
-streamlit>=1.37,<1.41
-groq>=0.11.0,<1.0
-python-dotenv>=1.0.1
+streamlit
+groq
+python-dotenv
 
 # --- PDF parsing ---
-pdfminer.six>=20231228
+pdfminer.six
 
 # --- Database ---
-SQLAlchemy>=2.0.30,<2.1
-psycopg2-binary>=2.9.9
+SQLAlchemy
+psycopg2-binary
 
 # --- Misc (small helper) ---
-typing_extensions>=4.9
+typing_extensions
+
