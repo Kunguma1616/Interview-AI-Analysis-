@@ -214,10 +214,8 @@ def ensure_package(pkg_name: str, import_name: Optional[str] = None) -> bool:
 ensure_package("python-dotenv", "dotenv")
 ensure_package("pdfminer.six", "pdfminer") # NEW: Ensure pdfminer is checked
 from dotenv import load_dotenv
-load_dotenv(override=True)  # allow .env to replace anything
+load_dotenv(override=True)  # allow .env to replace anythin
 
-# HARD-CODED FALLBACKS (used only if env vars are missing)
-DEFAULT_GROQ_KEY = "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"
 DEFAULT_DATABASE_URL = "postgresql+psycopg2://postgres:Balaji%401616@db.johhgvlloevgihyhzhxi.supabase.co:5432/postgres?sslmode=require"
 
 # Effective values (env wins; else fallback)
@@ -2324,3 +2322,4 @@ st.markdown("""
   <p style='font-size: 0.85rem; margin-top: 1rem; opacity:.9;'>Built with Streamlit • Powered by Groq AI</p>
 </div>
 """, unsafe_allow_html=True)
+
