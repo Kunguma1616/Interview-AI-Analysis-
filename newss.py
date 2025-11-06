@@ -17,45 +17,31 @@ import pathlib
 import base64
 
 # =========================
-# PDF Reading Import (NEW)
+# PDF Reading Import
 # =========================
-try:
-    from pdfminer.high_level import extract_text
-except ImportError:
-    st.info("Installing pdfminer.six for PDF reading...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pdfminer.six", "--quiet"])
-    from pdfminer.high_level import extract_text
+# This now assumes pdfminer.six is in your requirements.txt
+from pdfminer.high_level import extract_text
 
 # =========================
 # PDF Generation (ReportLab) Imports
 # =========================
-def ensure_reportlab():
-    """Ensure reportlab is installed"""
-    try:
-        import reportlab
-        return True
-    except ImportError:
-        try:
-            st.info("📦 Installing reportlab for PDF generation...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "reportlab", "--quiet"])
-            return True
-        except Exception as e:
-            st.error(f"Failed to install reportlab: {e}")
-            return False
+# This now assumes reportlab is in your requirements.txt
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Image, HRFlowable, 
+    PageBreak, Table, TableStyle
+)
+from reportlab.lib.units import inch
+from io import BytesIO
 
-# Call this once
-if ensure_reportlab():
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib import colors
-    from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Image, HRFlowable, 
-        PageBreak, Table, TableStyle
-    )
-    from reportlab.lib.units import inch
-    from io import BytesIO
-else:
-    st.error("Failed to install ReportLab. PDF generation will not work.")
+# =========================
+# Other Imports
+# =========================
+# These now assume they are in your requirements.txt
+from dotenv import load_dotenv
+import sqlalchemy # For DB connection
 
 # =========================
 # Page Config + Styles
@@ -193,37 +179,22 @@ def extract_pdf_text(uploaded_file):
         return None
 
 # =========================
-# Runtime package helper
-# =========================
-def ensure_package(pkg_name: str, import_name: Optional[str] = None) -> bool:
-    try:
-        __import__(import_name or pkg_name)
-        return True
-    except Exception:
-        try:
-            st.info(f"📦 Installing {pkg_name}…")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg_name, "--quiet"])
-            return True
-        except Exception as e:
-            st.error(f"Failed to install {pkg_name}: {e}")
-            return False
-
-# =========================
 # .env & Config
 # =========================
-ensure_package("python-dotenv", "dotenv")
-ensure_package("pdfminer.six", "pdfminer") # NEW: Ensure pdfminer is checked
-from dotenv import load_dotenv
-load_dotenv(override=True)  # allow .env to replace anythin
+load_dotenv(override=True)  # allow .env to replace anything locally
 
-DEFAULT_DATABASE_URL = "postgresql+psycopg2://postgres:Balaji%401616@db.johhgvlloevgihyhzhxi.supabase.co:5432/postgres?sslmode=require"
+# HARD-CODED FALLBACKS (used only if env vars are missing)
+# --- FIX: Removed hard-coded keys ---
+# These will be populated by Streamlit Secrets on the cloud
+DEFAULT_GROQ_KEY = ""
+DEFAULT_DATABASE_URL = "" 
 
 # Effective values (env wins; else fallback)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or DEFAULT_GROQ_KEY
 DATABASE_URL = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
 
 def _mask(s: str, show: int = 4) -> str:
-    if not s: return "—"
+    if not s: return "— NOT SET —" # Changed message
     return s[:show] + "…" + s[-show:] if len(s) > show*2 else "****"
 
 # =========================
@@ -261,7 +232,7 @@ class DBBackend:
         if not DATABASE_URL:
             return False, "DATABASE_URL not set."
         try:
-            ensure_package("sqlalchemy")
+            # Removed ensure_package, this now assumes sqlalchemy is in requirements.txt
             from sqlalchemy import create_engine, text
             engine = create_engine(DATABASE_URL, pool_pre_ping=True)
             with engine.connect() as conn:
@@ -475,8 +446,9 @@ DB_OK, DB_MODE = db.init()
 # =========================
 def groq_client():
     if not GROQ_API_KEY:
-        st.error("❌ Missing GROQ_API_KEY! Please set it in the sidebar or your .env file.")
-        raise RuntimeError("Missing GROQ_API_KEY (set it in .env or via sidebar).")
+        st.error("❌ Missing GROQ_API_KEY! Please set it in your Streamlit Cloud Secrets.")
+        st.sidebar.error("❌ Missing GROQ_API_KEY! Please set it in your Streamlit Cloud Secrets.")
+        raise RuntimeError("Missing GROQ_API_KEY (set it in Streamlit Secrets).")
     try:
         return Groq(api_key=GROQ_API_KEY)
     except Exception as e:
@@ -854,7 +826,7 @@ Be thorough, objective, and provide actionable insights that will help HR make a
         if "rate_limit" in error_msg.lower() or "413" in error_msg:
             st.error("⚠️ Rate limit exceeded (6000 TPM). Request was too large. Try a shorter transcript or wait a minute.")
         elif "invalid" in error_msg.lower() and "key" in error_msg.lower():
-            st.error("⚠️ Invalid API key. Please check your GROQ_API_KEY in the sidebar.")
+            st.error("⚠️ Invalid API key. Please check your GROQ_API_KEY in Streamlit Secrets.")
         elif "timeout" in error_msg.lower():
             st.error("⚠️ Request timed out. Try with a shorter transcript.")
         
@@ -862,7 +834,7 @@ Be thorough, objective, and provide actionable insights that will help HR make a
             "##  AI ANALYSIS FAILED\n"
             f"**Error:** {error_msg}\n\n"
             "**Troubleshooting:**\n"
-            "1. Check that your GROQ_API_KEY is valid and active\n"
+            "1. Check that your GROQ_API_KEY is valid and active in Streamlit Secrets\n"
             "2. Ensure you haven't exceeded your API rate limits (6000 TPM for on-demand tier)\n"
             "3. Try with a shorter transcript (under 12,000 characters)\n"
             "4. Check your internet connection\n\n"
@@ -1567,14 +1539,16 @@ def build_interview_pdf_bytes(
 # UI — Header & Banner (with logo)
 # =========================
 st.sidebar.markdown("### ")
+# --- FIX: Changed hard-coded path to relative path ---
+logo_path_default = "images.png" # Assumes 'images.png' is in your GitHub repo root
 logo_path = st.sidebar.text_input(
     "Logo path",
-    value=r"C:\Users\User\Downloads\images.png",
-    help="Absolute path to your logo (PNG/JPG)."
+    value=logo_path_default,
+    help="Relative path to your logo (e.g., images.png). Must be in your GitHub repo."
 )
 logo_b64 = encode_image_base64(logo_path)
 if logo_path and not logo_b64:
-    st.sidebar.caption(" Logo not found at the given path. The app will continue without it.")
+    st.sidebar.caption(" Logo not found. Make sure 'images.png' is in your GitHub repo.")
 
 hero_parts = ['<div class="hero-header">']
 if logo_b64:
@@ -1587,10 +1561,11 @@ st.markdown("\n".join(hero_parts), unsafe_allow_html=True)
 # =========================
 # Sidebar (config + search)
 # =========================
-st.sidebar.header(" Configuration (.env)")
+st.sidebar.header(" ⚙️ Configuration")
+st.sidebar.info("This app requires API keys set in Streamlit Cloud Secrets.")
 # Runtime config preview (masked)
 st.sidebar.markdown("---")
-st.sidebar.subheader("Runtime Config (active)")
+st.sidebar.subheader("Active Config")
 st.sidebar.write(f"GROQ_API_KEY: `{_mask(GROQ_API_KEY)}`")
 st.sidebar.write(f"DATABASE_URL: `{_mask(DATABASE_URL, 6)}`")
 
@@ -1598,7 +1573,7 @@ st.sidebar.write(f"DATABASE_URL: `{_mask(DATABASE_URL, 6)}`")
 with st.sidebar.expander("🔧 Diagnostics & Troubleshooting"):
     st.write("**API Status:**")
     if GROQ_API_KEY and GROQ_API_KEY != "":
-        st.success("✅ API key is set")
+        st.success("✅ GROQ_API_KEY is set")
         if st.button("Test Connection Now"):
             try:
                 client = groq_client()
@@ -1613,35 +1588,35 @@ with st.sidebar.expander("🔧 Diagnostics & Troubleshooting"):
             except Exception as e:
                 st.error(f"❌ Connection failed: {e}")
     else:
-        st.error("❌ API key not set")
+        st.error("❌ GROQ_API_KEY is not set in Secrets")
     
+    st.write("**Database Status:**")
+    if DATABASE_URL and DATABASE_URL != "":
+        st.success("✅ DATABASE_URL is set")
+    else:
+        st.error("❌ DATABASE_URL is not set in Secrets")
+        st.info("App will use temporary local storage (data will be lost on reboot).")
+
     st.write("**Common Issues:**")
     st.markdown("""
+    - **404 / Invalid Key:** Your GROQ_API_KEY in Streamlit Secrets is wrong or expired.
     - **Rate Limit:** Wait 60 seconds between requests
-    - **Invalid Key:** Check your Groq dashboard
     - **Timeout:** Try shorter transcripts (<12k chars)
-    - **Empty Response:** Model might be overloaded, retry
-    """)
-    
-    st.write("**Quick Fixes:**")
-    st.markdown("""
-    1. Verify API key in Groq console
-    2. Check your account has credits/quota
-    3. Test with sample short transcript first
-    4. Clear browser cache and reload
     """)
 
+# Section for local testing (will be ignored on cloud if keys are set)
 if not GROQ_API_KEY:
-    with st.sidebar.expander("Set GROQ_API_KEY (local dev)"):
+    with st.sidebar.expander("Set API Key (Local Dev Only)"):
         _groq = st.text_input("GROQ_API_KEY", type="password")
         if st.button("Use GROQ key"):
             if _groq.strip():
                 GROQ_API_KEY = _groq.strip()
                 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
                 st.sidebar.success("GROQ_API_KEY set for this session.")
+                st.rerun()
 
 if not DATABASE_URL:
-    with st.sidebar.expander("Set DATABASE_URL (local dev)"):
+    with st.sidebar.expander("Set DB URL (Local Dev Only)"):
         _db = st.text_input("DATABASE_URL", type="password", help="postgresql://USER:PASSWORD@HOST:PORT/postgres")
         if st.button("Use DB URL"):
             if _db.strip():
@@ -1650,9 +1625,10 @@ if not DATABASE_URL:
                 db.__init__()
                 ok, mode = db.init()
                 st.sidebar.success(f"DB re-initialized using: {mode if ok else 'none'}")
+                st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.write(f"**Data store:** {' 🐘 Postgres' if DB_OK and DB_MODE=='postgres' else ' 🗄️ Local SQLite '}")
+st.sidebar.write(f"**Data store:** {' 🐘 Postgres' if DB_OK and DB_MODE=='postgres' else ' 🗄️ Local SQLite (Warning: Temp)'}")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔎 Search Candidates")
@@ -1786,7 +1762,7 @@ with col_analyze:
     
     if not GROQ_API_KEY or GROQ_API_KEY == "":
         can_analyze = False
-        error_messages.append("❌ GROQ_API_KEY is missing")
+        error_messages.append("❌ GROQ_API_KEY is missing (Set in Secrets)")
     
     text_val = st.session_state.get("transcript_text", "").strip()
     if not text_val:
@@ -1801,22 +1777,6 @@ with col_analyze:
     if error_messages:
         for msg in error_messages:
             st.warning(msg)
-    
-    # Test API connection before analysis
-    if can_analyze and st.button("🔍 Test API Connection", use_container_width=True):
-        with st.spinner("Testing Groq API..."):
-            try:
-                client = groq_client()
-                test_resp = client.chat.completions.create(
-                    messages=[{"role": "user", "content": "test"}],
-                    model="llama-3.1-8b-instant",
-                    max_tokens=10,
-                    timeout=10
-                )
-                st.success("✅ API connection successful!")
-            except Exception as e:
-                st.error(f"❌ API test failed: {e}")
-                can_analyze = False
     
     if st.button(" Analyze Transcript", use_container_width=True, type="primary", disabled=not can_analyze):
         if not can_analyze:
@@ -1906,7 +1866,7 @@ with col_analyze:
                     
                 except Exception as e:
                     st.error(f" Analysis failed: {e}")
-                    st.info("Tip: Try with a shorter transcript or check your API key.")
+                    st.info("Tip: Try with a shorter transcript or check your API key in Secrets.")
 
 # =========================
 # Display helper renderers
@@ -2322,4 +2282,3 @@ st.markdown("""
   <p style='font-size: 0.85rem; margin-top: 1rem; opacity:.9;'>Built with Streamlit • Powered by Groq AI</p>
 </div>
 """, unsafe_allow_html=True)
-
