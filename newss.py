@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import tempfile
 from pathlib import Path
-from groq import Groq
 import json
 import subprocess
 import sys
@@ -17,31 +16,58 @@ import pathlib
 import base64
 
 # =========================
-# PDF Reading Import
+# PDF Reading Import (NEW)
 # =========================
-# This now assumes pdfminer.six is in your requirements.txt
-from pdfminer.high_level import extract_text
+try:
+    from pdfminer.high_level import extract_text
+except ImportError:
+    st.info("Installing pdfminer.six for PDF reading...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pdfminer.six", "--quiet"])
+    from pdfminer.high_level import extract_text
 
 # =========================
 # PDF Generation (ReportLab) Imports
 # =========================
-# This now assumes reportlab is in your requirements.txt
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Image, HRFlowable, 
-    PageBreak, Table, TableStyle
-)
-from reportlab.lib.units import inch
-from io import BytesIO
+def ensure_package(pkg_name: str, import_name: Optional[str] = None) -> bool:
+    try:
+        __import__(import_name or pkg_name)
+        return True
+    except Exception:
+        try:
+            st.info(f"📦 Installing {pkg_name}…")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg_name, "--quiet"])
+            return True
+        except Exception as e:
+            st.error(f"Failed to install {pkg_name}: {e}")
+            return False
 
-# =========================
-# Other Imports
-# =========================
-# These now assume they are in your requirements.txt
-from dotenv import load_dotenv
-import sqlalchemy # For DB connection
+def ensure_reportlab():
+    """Ensure reportlab is installed"""
+    try:
+        import reportlab
+        return True
+    except ImportError:
+        try:
+            st.info("📦 Installing reportlab for PDF generation...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "reportlab", "--quiet"])
+            return True
+        except Exception as e:
+            st.error(f"Failed to install reportlab: {e}")
+            return False
+
+# Call this once
+if ensure_reportlab():
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Image, HRFlowable,
+        PageBreak, Table, TableStyle
+    )
+    from reportlab.lib.units import inch
+    from io import BytesIO
+else:
+    st.error("Failed to install ReportLab. PDF generation will not work.")
 
 # =========================
 # Page Config + Styles
@@ -170,7 +196,6 @@ st.markdown("""
 def extract_pdf_text(uploaded_file):
     """Extracts text from a Streamlit UploadedFile object (PDF)."""
     try:
-        # Reset stream position just in case
         uploaded_file.seek(0)
         text = extract_text(uploaded_file)
         return text
@@ -179,22 +204,21 @@ def extract_pdf_text(uploaded_file):
         return None
 
 # =========================
-# .env & Config
+# .env & Config (FIXED)
 # =========================
-load_dotenv(override=True)  # allow .env to replace anything locally
+ensure_package("python-dotenv", "dotenv")
+ensure_package("pdfminer.six", "pdfminer")  # Ensure pdfminer is checked
+from dotenv import load_dotenv
+load_dotenv(override=True)  # allow .env to replace anything
 
-# HARD-CODED FALLBACKS (used only if env vars are missing)
-# --- FIX: Removed hard-coded keys ---
-# These will be populated by Streamlit Secrets on the cloud
-DEFAULT_GROQ_KEY = ""
-DEFAULT_DATABASE_URL = "" 
+DEFAULT_DATABASE_URL = "postgresql+psycopg2://postgres:Balaji%401616@db.johhgvlloevgihyhzhxi.supabase.co:5432/postgres?sslmode=require"
 
 # Effective values (env wins; else fallback)
-GROQ_API_KEY = os.getenv("GROQ_API_KEY") or DEFAULT_GROQ_KEY
-DATABASE_URL = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()   # <-- FIX: no DEFAULT_GROQ_KEY
+DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
 
 def _mask(s: str, show: int = 4) -> str:
-    if not s: return "— NOT SET —" # Changed message
+    if not s: return "—"
     return s[:show] + "…" + s[-show:] if len(s) > show*2 else "****"
 
 # =========================
@@ -215,7 +239,7 @@ defaults = {
     "jd_struct": None,
     "jd_eval": None,
     "use_jd": False,
-    "transcript_text": "", # NEW: Add this for the text area
+    "transcript_text": "",
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -232,7 +256,8 @@ class DBBackend:
         if not DATABASE_URL:
             return False, "DATABASE_URL not set."
         try:
-            # Removed ensure_package, this now assumes sqlalchemy is in requirements.txt
+            ensure_package("sqlalchemy")
+            ensure_package("psycopg2-binary")  # ensure Postgres driver
             from sqlalchemy import create_engine, text
             engine = create_engine(DATABASE_URL, pool_pre_ping=True)
             with engine.connect() as conn:
@@ -442,14 +467,15 @@ db = DBBackend()
 DB_OK, DB_MODE = db.init()
 
 # =========================
-# Groq Helpers
+# Groq Helpers (FIXED import)
 # =========================
 def groq_client():
     if not GROQ_API_KEY:
-        st.error("❌ Missing GROQ_API_KEY! Please set it in your Streamlit Cloud Secrets.")
-        st.sidebar.error("❌ Missing GROQ_API_KEY! Please set it in your Streamlit Cloud Secrets.")
-        raise RuntimeError("Missing GROQ_API_KEY (set it in Streamlit Secrets).")
+        st.error("❌ Missing GROQ_API_KEY! Please set it in the sidebar or your .env file.")
+        raise RuntimeError("Missing GROQ_API_KEY (set it in .env or via sidebar).")
+    ensure_package("groq")
     try:
+        from groq import Groq
         return Groq(api_key=GROQ_API_KEY)
     except Exception as e:
         st.error(f"❌ Failed to initialize Groq client: {e}")
@@ -479,11 +505,8 @@ def parse_jd_to_competencies(jd_text: str) -> Dict[str, Any]:
         }
     try:
         client = groq_client()
-        
-        # Truncate JD if too long
         max_chars = 8000
         truncated_jd = jd_text[:max_chars] if len(jd_text) > max_chars else jd_text
-        
         prompt = f"""
 You are a recruiter's analyst. From the JD below, produce STRICT JSON:
 
@@ -520,7 +543,6 @@ JD:
         return data
     except Exception as e:
         st.warning(f"⚠️ JD parsing error: {e}. Using fallback extraction.")
-        # Fallback extraction
         mh = re.findall(r"\b(React|Node\.?js|Python|TypeScript|JavaScript|Java|SQL|AWS|Docker|Kubernetes|CI/CD|REST|GraphQL|Angular|Vue|C\+\+|C#|Ruby|Go|Rust)\b", jd_text, flags=re.I)
         sh = re.findall(r"\b(communication|ownership|leadership|problem[- ]?solving|collaboration|teamwork|time management|critical thinking)\b", jd_text, flags=re.I)
         yrs = {}
@@ -544,18 +566,12 @@ def mine_evidence_from_transcript(competencies: Dict[str, Any], transcript: str)
         (competencies.get("nice_to_have") or []) +
         (competencies.get("soft_skills") or [])
     ))
-    
     if not comp_list:
         return {"competencies": {}}
-    
     try:
         client = groq_client()
-        
-        # Truncate transcript for evidence mining
-        # === FIX 2: Reduced max_chars from 15000 to 12000 ===
         max_chars = 12000
         truncated_transcript = transcript[:max_chars] if len(transcript) > max_chars else transcript
-        
         prompt = f"""
 You are a hiring bar-raiser. Given a competency list and an interview transcript,
 return JSON:
@@ -735,14 +751,10 @@ Evidence:
 def analyze_interview(transcription, candidate_name, position):
     try:
         client = groq_client()
-        
-        # Truncate transcript if too long (Groq has token limits)
-        # === FIX 1: Reduced max_chars from 20000 to 12000 ===
-        max_chars = 12000  # Reduced to fit < 6000 TPM budget
+        max_chars = 12000
         truncated_transcript = transcription[:max_chars] if len(transcription) > max_chars else transcription
         if len(transcription) > max_chars:
             st.warning(f"⚠️ Transcript truncated from {len(transcription)} to {max_chars} characters for AI processing.")
-        
         prompt = f"""You are an expert HR analyst and recruitment specialist. Analyze this interview transcription for the position of {position} with candidate {candidate_name}.
 
 Provide a COMPREHENSIVE and VERY DETAILED analysis in the following format. Be thorough and quote examples.
@@ -799,7 +811,6 @@ Interview Transcription:
 {truncated_transcript}
 
 Be thorough, objective, and provide actionable insights that will help HR make an informed hiring decision."""
-        
         chat_completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": "You are an expert HR recruitment analyst with 20+ years of experience in talent acquisition, candidate assessment, and hiring decisions. You provide detailed, actionable insights that help companies make better hiring decisions."},
@@ -807,34 +818,27 @@ Be thorough, objective, and provide actionable insights that will help HR make a
             ],
             model="llama-3.1-8b-instant",
             temperature=0.3,
-            # === FIX 1: Reduced max_tokens from 6000 to 2000 ===
-            max_tokens=2000, # Reduced to fit < 6000 TPM budget
-            timeout=60  # Add timeout to prevent hanging
+            max_tokens=2000,
+            timeout=60
         )
-        
         result = chat_completion.choices[0].message.content
         if not result or len(result.strip()) < 100:
             raise ValueError("AI returned empty or too short response")
-            
         return result
-        
     except Exception as e:
         error_msg = str(e)
         st.error(f"❌ Error in analyze_interview: {error_msg}")
-        
-        # Provide more specific error messages
         if "rate_limit" in error_msg.lower() or "413" in error_msg:
             st.error("⚠️ Rate limit exceeded (6000 TPM). Request was too large. Try a shorter transcript or wait a minute.")
         elif "invalid" in error_msg.lower() and "key" in error_msg.lower():
-            st.error("⚠️ Invalid API key. Please check your GROQ_API_KEY in Streamlit Secrets.")
+            st.error("⚠️ Invalid API key. Please check your GROQ_API_KEY in the sidebar.")
         elif "timeout" in error_msg.lower():
             st.error("⚠️ Request timed out. Try with a shorter transcript.")
-        
         return (
             "##  AI ANALYSIS FAILED\n"
             f"**Error:** {error_msg}\n\n"
             "**Troubleshooting:**\n"
-            "1. Check that your GROQ_API_KEY is valid and active in Streamlit Secrets\n"
+            "1. Check that your GROQ_API_KEY is valid and active\n"
             "2. Ensure you haven't exceeded your API rate limits (6000 TPM for on-demand tier)\n"
             "3. Try with a shorter transcript (under 12,000 characters)\n"
             "4. Check your internet connection\n\n"
@@ -971,11 +975,8 @@ def extract_detailed_chapters(transcription: str, position: str) -> List[Dict[st
     chapters: List[Dict[str, Any]] = []
     try:
         client = groq_client()
-        
-        # Truncate transcript if needed
         max_chars = 12000
         truncated_transcript = transcription[:max_chars] if len(transcription) > max_chars else transcription
-        
         prompt = f"""Analyze this interview transcript for a {position} position and create detailed chapters like Noota.ai does.
 
 Return ONLY valid JSON with this structure:
@@ -1021,7 +1022,6 @@ Transcript:
     except Exception as e:
         st.warning(f"⚠️ Chapter extraction error: {e}. Using fallback chapter generation.")
         chapters = []
-    
     if not chapters:
         chapters = _fallback_detailed_chapters(transcription, position)
     return chapters
@@ -1029,11 +1029,8 @@ Transcript:
 def extract_insights_and_chapters(transcription: str, position: str) -> Dict[str, Any]:
     try:
         client = groq_client()
-        
-        # Truncate transcript if needed
         max_chars = 12000
         truncated_transcript = transcription[:max_chars] if len(transcription) > max_chars else transcription
-        
         instruction = f"""
 You are an expert HR interview analyst. From the following interview transcript for a {position} role, extract structured, concise JSON.
 Provide as much detail as possible in the 'note' fields.
@@ -1103,26 +1100,20 @@ Transcript:
 def chat_with_meeting(user_message: str, transcript: str, analysis: str, candidate_name: str, position: str) -> str:
     try:
         client = groq_client()
-        
-        # Truncate context if too long
         max_transcript = 10000
         max_analysis = 5000
         truncated_transcript = transcript[:max_transcript] if len(transcript) > max_transcript else transcript
         truncated_analysis = analysis[:max_analysis] if len(analysis) > max_analysis else analysis
-        
         context = truncated_transcript + "\n\n=== ANALYSIS SUMMARY ===\n" + truncated_analysis
-        
         if any(word in user_message.lower() for word in ["resume", "cv", "curriculum vitae"]):
             sys_prompt = f"""You are an expert resume writer. Based on the interview transcript and analysis, create a professional, detailed resume for {candidate_name} applying for {position}.
 Include: Contact, Summary, Work Experience, Education, Technical Skills, Soft Skills, Achievements, Certifications."""
         else:
             sys_prompt = "You are an HR assistant. Answer strictly from transcript + analysis. Be specific and mention timestamps if available."
-        
         messages = [
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {user_message}"}
         ]
-        
         resp = client.chat.completions.create(
             messages=messages,
             model="llama-3.1-8b-instant",
@@ -1131,7 +1122,6 @@ Include: Contact, Summary, Work Experience, Education, Technical Skills, Soft Sk
             timeout=30
         )
         return resp.choices[0].message.content
-        
     except Exception as e:
         st.error(f"❌ Chat error: {e}")
         q = (user_message or "").lower()
@@ -1149,7 +1139,6 @@ Include: Contact, Summary, Work Experience, Education, Technical Skills, Soft Sk
 **Fit:** Suitable for {position}.
 
 *Note: This is a fallback response. The AI chat feature encountered an error: {e}*"""
-        
         if "strength" in q:
             return f"""**Key Strengths**
 1) Clear, structured communication.
@@ -1157,14 +1146,12 @@ Include: Contact, Summary, Work Experience, Education, Technical Skills, Soft Sk
 3) Collaborative mindset with feedback loops.
 
 *Note: This is a fallback response. The AI chat feature encountered an error: {e}*"""
-        
         if "red flag" in q or "concern" in q:
             return f"""**Potential Concerns**
 - Limited quantified impact in examples.
 - Needs more details on scaling/system trade-offs.
 
 *Note: This is a fallback response. The AI chat feature encountered an error: {e}*"""
-        
         return f"I encountered an error processing your question: {e}\n\nPlease try rephrasing or check your API connection."
 
 # =========================
@@ -1248,65 +1235,49 @@ def build_interview_pdf_bytes(
     jd_eval: Optional[Dict[str, Any]] = None
 ) -> bytes:
     """Generate professional PDF report for interview analysis"""
-    
     buff = BytesIO()
     doc = SimpleDocTemplate(buff, pagesize=A4, leftMargin=45, rightMargin=45, topMargin=45, bottomMargin=45)
-    
-    # Define styles
     styles = getSampleStyleSheet()
-    
     title_style = ParagraphStyle(
         "CustomTitle", parent=styles["Title"], fontSize=24,
         textColor=colors.HexColor("#27549D"), alignment=1, spaceAfter=10
     )
-    
     subtitle_style = ParagraphStyle(
         "CustomSubtitle", parent=styles["Heading2"], fontSize=14,
         textColor=colors.HexColor("#0f1e33"), alignment=1, spaceAfter=20
     )
-    
     section_header_style = ParagraphStyle(
         "SectionHeader", parent=styles["Heading2"], fontSize=16,
         textColor=colors.HexColor("#27549D"), spaceAfter=10, spaceBefore=15
     )
-    
     subsection_style = ParagraphStyle(
         "Subsection", parent=styles["Heading3"], fontSize=13,
         textColor=colors.HexColor("#0f1e33"), spaceAfter=8
     )
-    
     body_style = ParagraphStyle(
         "CustomBody", parent=styles["BodyText"], fontSize=10, leading=14, spaceAfter=8
     )
-    
     bullet_style = ParagraphStyle(
         "BulletStyle", parent=styles["BodyText"], fontSize=10, leading=13, leftIndent=20, spaceAfter=5
     )
-    
-    # Build document
+
     story = []
-    
-    # Logo
     if logo_path and Path(logo_path).exists():
         try:
-            story.append(Image(logo_path, width=1*inch, height=1*inch)) # Adjusted size
+            story.append(Image(logo_path, width=1*inch, height=1*inch))
             story.append(Spacer(1, 10))
         except Exception:
-            pass # Fail silently if logo fails
-    
-    # Header
+            pass
     story.append(Paragraph("Aspect AI Interview Analysis Report", title_style))
     story.append(Paragraph("Comprehensive AI-Powered Interview Evaluation", subtitle_style))
     story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#27549D")))
     story.append(Spacer(1, 15))
-    
-    # Candidate Info Table
+
     info_data = [
         ["Candidate:", candidate_name or "—"],
         ["Position:", position or "—"],
         ["Analysis Date:", timestamp or "—"]
     ]
-    
     info_table = Table(info_data, colWidths=[1.5*inch, 4*inch])
     info_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f0f4f8")),
@@ -1320,17 +1291,13 @@ def build_interview_pdf_bytes(
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e0")),
         ('ROWBACKGROUNDS', (0, 0), (-1, -1), [colors.white, colors.HexColor("#f7fafc")])
     ]))
-    
     story.append(info_table)
     story.append(Spacer(1, 20))
-    
-    # JD Match Score (if available)
+
     if jd_eval and jd_eval.get("overall_score"):
         overall_score = jd_eval.get("overall_score", 0) * 100
         story.append(Paragraph("Job Description Alignment", section_header_style))
-        
         score_data = [["Overall Match Score:", f"{overall_score:.1f}%"]]
-        
         if jd_eval.get("buckets"):
             buckets = jd_eval["buckets"]
             score_data.extend([
@@ -1339,7 +1306,6 @@ def build_interview_pdf_bytes(
                 ["Role Fit:", f"{buckets.get('role_fit', 0)*100:.1f}%"],
                 ["Experience Alignment:", f"{buckets.get('experience_alignment', 0)*100:.1f}%"]
             ])
-        
         score_table = Table(score_data, colWidths=[2.5*inch, 2*inch])
         score_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#27549D")),
@@ -1353,41 +1319,31 @@ def build_interview_pdf_bytes(
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e0"))
         ]))
-        
         story.append(score_table)
         story.append(Spacer(1, 15))
-        
-        # Gaps
         gaps = jd_eval.get("gaps", [])
         if gaps:
             story.append(Paragraph("Identified Skill Gaps", subsection_style))
             for gap in gaps:
                 story.append(Paragraph(f"• {gap}", bullet_style))
             story.append(Spacer(1, 10))
-    
-    # AI Analysis Section
+
     story.append(PageBreak())
     story.append(Paragraph("Comprehensive AI Analysis", section_header_style))
     story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
     story.append(Spacer(1, 10))
-    
-    # Parse and render analysis sections
+
     if analysis:
-        # Sanitize HTML-like markdown for PDF
-        clean_analysis = re.sub(r'<[^>]+>', '', analysis) 
-        
+        clean_analysis = re.sub(r'<[^>]+>', '', analysis)
         sections = clean_analysis.split("##")
         for section in sections:
             section = section.strip()
             if not section:
                 continue
-            
             lines = section.split("\n", 1)
             if len(lines) > 1:
                 header, content = lines
                 story.append(Paragraph(header.strip().replace('*', ''), subsection_style))
-                
-                # Process content
                 for line in content.split("\n"):
                     line = line.strip().replace('*', '')
                     if not line:
@@ -1396,23 +1352,18 @@ def build_interview_pdf_bytes(
                         story.append(Paragraph(f"• {line.lstrip('-• ')}", bullet_style))
                     else:
                         story.append(Paragraph(line, body_style))
-                
                 story.append(Spacer(1, 10))
             else:
                 story.append(Paragraph(section, body_style))
-    
-    # Skills Assessment
+
     if insights:
         story.append(PageBreak())
         story.append(Paragraph("Skills Assessment", section_header_style))
         story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
         story.append(Spacer(1, 10))
-        
-        # Technical Skills
         tech_skills = insights.get("technical_assessment", [])
         if tech_skills:
             story.append(Paragraph("Technical Competencies", subsection_style))
-            
             tech_data = [["Skill/Topic", "Assessment", "Timestamp"]]
             for skill in tech_skills[:10]:
                 tech_data.append([
@@ -1420,7 +1371,6 @@ def build_interview_pdf_bytes(
                     skill.get("result", "—"),
                     skill.get("timestamp", "—")
                 ])
-            
             tech_table = Table(tech_data, colWidths=[2.5*inch, 1.5*inch, 1*inch])
             tech_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#27549D")),
@@ -1436,15 +1386,11 @@ def build_interview_pdf_bytes(
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e0")),
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7fafc")])
             ]))
-            
             story.append(tech_table)
             story.append(Spacer(1, 15))
-        
-        # Soft Skills
         soft_skills = insights.get("soft_skills", [])
         if soft_skills:
             story.append(Paragraph("Soft Skills & Behavioral Traits", subsection_style))
-            
             soft_data = [["Skill", "Status", "Timestamp"]]
             for skill in soft_skills[:10]:
                 soft_data.append([
@@ -1452,7 +1398,6 @@ def build_interview_pdf_bytes(
                     skill.get("status", "—"),
                     skill.get("timestamp", "—")
                 ])
-            
             soft_table = Table(soft_data, colWidths=[2.5*inch, 1.5*inch, 1*inch])
             soft_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#27549D")),
@@ -1468,59 +1413,47 @@ def build_interview_pdf_bytes(
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e0")),
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7fafc")])
             ]))
-            
             story.append(soft_table)
             story.append(Spacer(1, 15))
-    
-    # Detailed Chapters
+
     if detailed_chapters:
         story.append(PageBreak())
         story.append(Paragraph("Interview Timeline & Chapters", section_header_style))
         story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
         story.append(Spacer(1, 10))
-        
         for idx, chapter in enumerate(detailed_chapters[:8], 1):
             story.append(Paragraph(
                 f"<b>{idx}. {chapter.get('title', 'Chapter')} ({chapter.get('timestamp', '—')} - {chapter.get('duration', '—')})</b>",
                 subsection_style
             ))
-            
             if chapter.get("summary"):
                 story.append(Paragraph(f"<b>Summary:</b> {chapter['summary']}", body_style))
-            
             if chapter.get("key_points"):
                 story.append(Paragraph("<b>Key Points:</b>", body_style))
                 for point in chapter["key_points"][:5]:
                     story.append(Paragraph(f"• {point}", bullet_style))
-            
             story.append(Spacer(1, 10))
-    
-    # Action Items
+
     if action_items:
         story.append(PageBreak())
         story.append(Paragraph("Recommended Next Steps", section_header_style))
         story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
         story.append(Spacer(1, 10))
-        
         for idx, item in enumerate(action_items, 1):
             story.append(Paragraph(f"{idx}. {item}", body_style))
-        
         story.append(Spacer(1, 15))
-    
-    # JD Recommendation
+
     if jd_eval and jd_eval.get("recommendation"):
         story.append(Paragraph("Final Recommendation", section_header_style))
         story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
         story.append(Spacer(1, 10))
         story.append(Paragraph(jd_eval["recommendation"], body_style))
-        
         if jd_eval.get("next_round_probes"):
             story.append(Spacer(1, 10))
             story.append(Paragraph("Suggested Follow-up Questions:", subsection_style))
             for probe in jd_eval["next_round_probes"][:5]:
                 story.append(Paragraph(f"• {probe}", bullet_style))
-    
-    # Footer
+
     story.append(Spacer(1, 20))
     story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
     story.append(Spacer(1, 10))
@@ -1528,27 +1461,23 @@ def build_interview_pdf_bytes(
         "Generated by Aspect AI Interview Analyzer — Empowering data-driven hiring decisions",
         ParagraphStyle("Footer", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#6b7280"), alignment=1)
     ))
-    
-    # Build PDF
+
     doc.build(story)
     buff.seek(0)
     return buff.read()
-
 
 # =========================
 # UI — Header & Banner (with logo)
 # =========================
 st.sidebar.markdown("### ")
-# --- FIX: Changed hard-coded path to relative path ---
-logo_path_default = "images.png" # Assumes 'images.png' is in your GitHub repo root
 logo_path = st.sidebar.text_input(
     "Logo path",
-    value=logo_path_default,
-    help="Relative path to your logo (e.g., images.png). Must be in your GitHub repo."
+    value=r"C:\Users\User\Downloads\images.png",
+    help="Absolute path to your logo (PNG/JPG)."
 )
 logo_b64 = encode_image_base64(logo_path)
 if logo_path and not logo_b64:
-    st.sidebar.caption(" Logo not found. Make sure 'images.png' is in your GitHub repo.")
+    st.sidebar.caption(" Logo not found at the given path. The app will continue without it.")
 
 hero_parts = ['<div class="hero-header">']
 if logo_b64:
@@ -1561,19 +1490,16 @@ st.markdown("\n".join(hero_parts), unsafe_allow_html=True)
 # =========================
 # Sidebar (config + search)
 # =========================
-st.sidebar.header(" ⚙️ Configuration")
-st.sidebar.info("This app requires API keys set in Streamlit Cloud Secrets.")
-# Runtime config preview (masked)
+st.sidebar.header(" Configuration (.env)")
 st.sidebar.markdown("---")
-st.sidebar.subheader("Active Config")
+st.sidebar.subheader("Runtime Config (active)")
 st.sidebar.write(f"GROQ_API_KEY: `{_mask(GROQ_API_KEY)}`")
 st.sidebar.write(f"DATABASE_URL: `{_mask(DATABASE_URL, 6)}`")
 
-# Add diagnostic section
 with st.sidebar.expander("🔧 Diagnostics & Troubleshooting"):
     st.write("**API Status:**")
     if GROQ_API_KEY and GROQ_API_KEY != "":
-        st.success("✅ GROQ_API_KEY is set")
+        st.success("✅ API key is set")
         if st.button("Test Connection Now"):
             try:
                 client = groq_client()
@@ -1588,35 +1514,35 @@ with st.sidebar.expander("🔧 Diagnostics & Troubleshooting"):
             except Exception as e:
                 st.error(f"❌ Connection failed: {e}")
     else:
-        st.error("❌ GROQ_API_KEY is not set in Secrets")
-    
-    st.write("**Database Status:**")
-    if DATABASE_URL and DATABASE_URL != "":
-        st.success("✅ DATABASE_URL is set")
-    else:
-        st.error("❌ DATABASE_URL is not set in Secrets")
-        st.info("App will use temporary local storage (data will be lost on reboot).")
+        st.error("❌ API key not set")
 
     st.write("**Common Issues:**")
     st.markdown("""
-    - **404 / Invalid Key:** Your GROQ_API_KEY in Streamlit Secrets is wrong or expired.
     - **Rate Limit:** Wait 60 seconds between requests
+    - **Invalid Key:** Check your Groq dashboard
     - **Timeout:** Try shorter transcripts (<12k chars)
+    - **Empty Response:** Model might be overloaded, retry
     """)
 
-# Section for local testing (will be ignored on cloud if keys are set)
+    st.write("**Quick Fixes:**")
+    st.markdown("""
+    1. Verify API key in Groq console
+    2. Check your account has credits/quota
+    3. Test with sample short transcript first
+    4. Clear browser cache and reload
+    """)
+
 if not GROQ_API_KEY:
-    with st.sidebar.expander("Set API Key (Local Dev Only)"):
+    with st.sidebar.expander("Set GROQ_API_KEY (local dev)"):
         _groq = st.text_input("GROQ_API_KEY", type="password")
         if st.button("Use GROQ key"):
             if _groq.strip():
                 GROQ_API_KEY = _groq.strip()
                 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
                 st.sidebar.success("GROQ_API_KEY set for this session.")
-                st.rerun()
 
 if not DATABASE_URL:
-    with st.sidebar.expander("Set DB URL (Local Dev Only)"):
+    with st.sidebar.expander("Set DATABASE_URL (local dev)"):
         _db = st.text_input("DATABASE_URL", type="password", help="postgresql://USER:PASSWORD@HOST:PORT/postgres")
         if st.button("Use DB URL"):
             if _db.strip():
@@ -1625,11 +1551,9 @@ if not DATABASE_URL:
                 db.__init__()
                 ok, mode = db.init()
                 st.sidebar.success(f"DB re-initialized using: {mode if ok else 'none'}")
-                st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.write(f"**Data store:** {' 🐘 Postgres' if DB_OK and DB_MODE=='postgres' else ' 🗄️ Local SQLite (Warning: Temp)'}")
-
+st.sidebar.write(f"**Data store:** {' 🐘 Postgres' if DB_OK and DB_MODE=='postgres' else ' 🗄️ Local SQLite '}")
 st.sidebar.markdown("---")
 st.sidebar.header("🔎 Search Candidates")
 query = st.sidebar.text_input("Type candidate name…", value="", key="search_input")
@@ -1648,9 +1572,7 @@ if st.sidebar.button("🔍 Search", key="search_button"):
                         st.session_state.position = data.get("position", "")
                         st.session_state.transcription = data.get("transcription", "")
                         st.session_state.analysis = data.get("analysis", "")
-                        # Load text into text areas for consistency
                         st.session_state.transcript_text = data.get("transcription", "")
-                        
                         try:
                             ins = data.get("insights")
                             ch = data.get("chapters")
@@ -1660,17 +1582,12 @@ if st.sidebar.button("🔍 Search", key="search_button"):
                             st.session_state.chapters = ch if isinstance(ch, list) else json.loads(ch or "[]")
                             st.session_state.action_items = ai if isinstance(ai, list) else json.loads(ai or "[]")
                             st.session_state.detailed_chapters = dc if isinstance(dc, list) else json.loads(dc or "[]")
-                            
-                            # Also load JD text if it's in the insights blob
                             jd_data = st.session_state.insights.get("jd", {})
                             if jd_data and jd_data.get("competencies"):
                                 st.session_state.jd_struct = jd_data.get("competencies")
                                 st.session_state.jd_eval = jd_data.get("scores", {})
                                 st.session_state.jd_eval.update(jd_data.get("rec_and_probes", {}))
-                                # Note: We don't save the original JD text, so we can't fully restore it.
-                                # This is a limitation of the current save format.
                                 st.session_state.use_jd = True
-
                         except Exception:
                             st.session_state.insights = {}
                             st.session_state.chapters = []
@@ -1678,7 +1595,6 @@ if st.sidebar.button("🔍 Search", key="search_button"):
                             st.session_state.detailed_chapters = []
                             st.session_state.jd_struct = None
                             st.session_state.jd_eval = None
-                            
                         ts = data.get("created_at", "")
                         st.session_state.timestamp = str(ts)
                         st.sidebar.success("✅ Loaded meeting into the app!")
@@ -1703,8 +1619,6 @@ if candidate_name and position:
 
 # ==== 🧾 Paste JD (NOW WITH PDF UPLOAD) ====
 st.markdown("### 🧾 Paste or Upload Job Description (JD)")
-
-# PDF Uploader for JD
 jd_file = st.file_uploader("Upload JD as PDF", type="pdf", key="jd_uploader")
 if jd_file:
     with st.spinner("Extracting JD text..."):
@@ -1712,9 +1626,8 @@ if jd_file:
         if extracted_text:
             st.session_state.jd_text = extracted_text
             st.success("✅ JD text extracted from PDF!")
-            # Clear the uploader after processing
-            st.session_state.jd_uploader = None 
-            st.rerun() # Rerun to show text in text_area
+            st.session_state.jd_uploader = None
+            st.rerun()
 
 st.session_state.jd_text = st.text_area(
     "Paste JD here (or upload PDF above)",
@@ -1729,22 +1642,18 @@ with col_jd_toggle:
 
 # ==== 📄 Paste Transcript (NOW WITH PDF UPLOAD) ====
 st.markdown("### Transcript (Paste or Upload)")
-
-# PDF/Text Uploader for Transcript
 transcript_file = st.file_uploader("Upload Transcript as PDF or TXT", type=["pdf", "txt"], key="transcript_uploader")
 if transcript_file:
     with st.spinner("Extracting transcript text..."):
         if transcript_file.type == "application/pdf":
             extracted_text = extract_pdf_text(transcript_file)
-        else: # TXT file
+        else:
             extracted_text = transcript_file.read().decode("utf-8")
-            
         if extracted_text:
             st.session_state.transcript_text = extracted_text
             st.success("✅ Transcript text extracted from file!")
-            # Clear the uploader after processing
             st.session_state.transcript_uploader = None
-            st.rerun() # Rerun to show text in text_area
+            st.rerun()
 
 st.session_state.transcript_text = st.text_area(
     "Paste transcript here (or upload above)",
@@ -1756,28 +1665,35 @@ st.session_state.transcript_text = st.text_area(
 
 col_analyze, _ = st.columns([1,3])
 with col_analyze:
-    # Pre-flight checks
     can_analyze = True
     error_messages = []
-    
     if not GROQ_API_KEY or GROQ_API_KEY == "":
         can_analyze = False
-        error_messages.append("❌ GROQ_API_KEY is missing (Set in Secrets)")
-    
+        error_messages.append("❌ GROQ_API_KEY is missing")
     text_val = st.session_state.get("transcript_text", "").strip()
     if not text_val:
         can_analyze = False
         error_messages.append("❌ No transcript provided")
-    
     if not (candidate_name and position):
         can_analyze = False
         error_messages.append("❌ Candidate name and position required")
-    
-    # Display errors if any
     if error_messages:
         for msg in error_messages:
             st.warning(msg)
-    
+    if can_analyze and st.button("🔍 Test API Connection", use_container_width=True):
+        with st.spinner("Testing Groq API..."):
+            try:
+                client = groq_client()
+                test_resp = client.chat.completions.create(
+                    messages=[{"role": "user", "content": "test"}],
+                    model="llama-3.1-8b-instant",
+                    max_tokens=10,
+                    timeout=10
+                )
+                st.success("✅ API connection successful!")
+            except Exception as e:
+                st.error(f"❌ API test failed: {e}")
+                can_analyze = False
     if st.button(" Analyze Transcript", use_container_width=True, type="primary", disabled=not can_analyze):
         if not can_analyze:
             st.error("Cannot analyze. Please fix the errors above first.")
@@ -1785,26 +1701,22 @@ with col_analyze:
             text_val = st.session_state.get("transcript_text", "").strip()
             with st.spinner("Analyzing transcript… (This may take 30-60 seconds)"):
                 try:
-                    # Clear chat history on new analysis
                     st.session_state.chat_history = []
-                    
-                    # Show progress
                     progress_bar = st.progress(0)
                     status_text = st.empty()
-                    
+
                     status_text.text("Step 1/4: Running main analysis...")
                     progress_bar.progress(25)
                     analysis = analyze_interview(text_val, candidate_name, position)
-                    
+
                     status_text.text("Step 2/4: Extracting insights and chapters...")
                     progress_bar.progress(50)
                     struct = extract_insights_and_chapters(text_val, position)
-                    
+
                     status_text.text("Step 3/4: Creating detailed chapters...")
                     progress_bar.progress(75)
                     detailed_chapters = extract_detailed_chapters(text_val, position)
 
-                    # JD-aware branch
                     jd_struct = {}
                     jd_evidence = {}
                     jd_eval = {}
@@ -1815,11 +1727,10 @@ with col_analyze:
                         jd_evidence = mine_evidence_from_transcript(jd_struct, text_val)
                         jd_eval = score_jd_alignment(jd_struct, jd_evidence)
                         jd_extra = generate_jd_recommendation(jd_struct, jd_eval, jd_evidence)
-                    
+
                     progress_bar.progress(100)
                     status_text.text("Complete!")
 
-                    # Session state
                     st.session_state.transcription = text_val
                     st.session_state.analysis = analysis or "(*Automated cloud analysis unavailable.*)"
                     st.session_state.candidate_name = candidate_name
@@ -1856,17 +1767,14 @@ with col_analyze:
                         {},
                         st.session_state.detailed_chapters
                     )
-                    
-                    # Clear progress indicators
+
                     progress_bar.empty()
                     status_text.empty()
-                    
                     st.success("Analysis complete!")
                     st.balloons()
-                    
                 except Exception as e:
                     st.error(f" Analysis failed: {e}")
-                    st.info("Tip: Try with a shorter transcript or check your API key in Secrets.")
+                    st.info("Tip: Try with a shorter transcript or check your API key.")
 
 # =========================
 # Display helper renderers
@@ -2125,8 +2033,8 @@ if st.session_state.transcription:
             st.session_state.chat_history.append({"role": "user", "content": user_q})
             with st.spinner("AI is thinking..."):
                 answer = chat_with_meeting(
-                    user_q, 
-                    st.session_state.transcription, 
+                    user_q,
+                    st.session_state.transcription,
                     st.session_state.analysis,
                     st.session_state.candidate_name,
                     st.session_state.position
@@ -2140,8 +2048,8 @@ if st.session_state.transcription:
                 st.session_state.chat_history.append({"role": "user", "content": "Generate a professional resume for this candidate"})
                 with st.spinner("Creating resume..."):
                     answer = chat_with_meeting(
-                        "Generate a professional resume for this candidate", 
-                        st.session_state.transcription, 
+                        "Generate a professional resume for this candidate",
+                        st.session_state.transcription,
                         st.session_state.analysis,
                         st.session_state.candidate_name,
                         st.session_state.position
@@ -2153,8 +2061,8 @@ if st.session_state.transcription:
                 st.session_state.chat_history.append({"role": "user", "content": "What are the candidate's key strengths with specific examples?"})
                 with st.spinner("Analyzing strengths..."):
                     answer = chat_with_meeting(
-                        "What are the candidate's key strengths with specific examples?", 
-                        st.session_state.transcription, 
+                        "What are the candidate's key strengths with specific examples?",
+                        st.session_state.transcription,
                         st.session_state.analysis,
                         st.session_state.candidate_name,
                         st.session_state.position
@@ -2166,8 +2074,8 @@ if st.session_state.transcription:
                 st.session_state.chat_history.append({"role": "user", "content": "Are there any red flags or concerns?"})
                 with st.spinner("Checking for concerns..."):
                     answer = chat_with_meeting(
-                        "Are there any red flags or concerns?", 
-                        st.session_state.transcription, 
+                        "Are there any red flags or concerns?",
+                        st.session_state.transcription,
                         st.session_state.analysis,
                         st.session_state.candidate_name,
                         st.session_state.position
@@ -2175,17 +2083,11 @@ if st.session_state.transcription:
                 st.session_state.chat_history.append({"role": "assistant", "content": answer})
                 st.rerun()
 
-    
-    # Export Options Section
     st.markdown("---")
     st.markdown("### 📥 Export Options")
-
-    # This container is crucial for making the download button work after generation
     download_container = st.container()
-
     with download_container:
         col_export1, col_export2, col_export3 = st.columns(3)
-
         with col_export1:
             if st.button("📄 Generate PDF Report", use_container_width=True, type="primary", key="btn_gen_pdf"):
                 with st.spinner("Generating PDF report..."):
@@ -2202,21 +2104,15 @@ if st.session_state.transcription:
                             action_items=st.session_state.action_items or [],
                             jd_eval=st.session_state.jd_eval
                         )
-                        
                         filename = f"Interview_Report_{st.session_state.candidate_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.pdf"
-                        
-                        # Store in session state to persist for the download button
                         st.session_state.pdf_bytes = pdf_bytes
                         st.session_state.pdf_filename = filename
                         st.success("✅ PDF ready! Click Download.")
-                        
                     except Exception as e:
                         st.error(f"❌ PDF generation failed: {e}")
                         st.info("Tip: Make sure reportlab is installed correctly")
                         if "pdf_bytes" in st.session_state:
                             del st.session_state.pdf_bytes
-            
-            # Show download button only if PDF bytes exist in session state
             if "pdf_bytes" in st.session_state and st.session_state.pdf_bytes:
                 st.download_button(
                     label="⬇️ Download PDF",
@@ -2224,11 +2120,10 @@ if st.session_state.transcription:
                     file_name=st.session_state.pdf_filename,
                     mime="application/pdf",
                     use_container_width=True,
-                    on_click=lambda: st.session_state.pop("pdf_bytes", None) # Clear after download
+                    on_click=lambda: st.session_state.pop("pdf_bytes", None)
                 )
 
         with col_export2:
-            # Generate JSON data for the download button
             export_data = {
                 "candidate_name": st.session_state.candidate_name,
                 "position": st.session_state.position,
@@ -2242,7 +2137,6 @@ if st.session_state.transcription:
             }
             json_str = json.dumps(export_data, indent=2, ensure_ascii=False)
             json_filename = f"Interview_Data_{st.session_state.candidate_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.json"
-
             st.download_button(
                 label="📊 Export as JSON",
                 data=json_str,
@@ -2253,9 +2147,7 @@ if st.session_state.transcription:
             )
 
         with col_export3:
-            # Generate TXT data for the download button
             txt_filename = f"Transcript_{st.session_state.candidate_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.txt"
-            
             st.download_button(
                 label="📝 Export Transcript",
                 data=st.session_state.transcription,
@@ -2268,7 +2160,6 @@ if st.session_state.transcription:
 else:
     st.markdown("---")
     st.info('👆 **Get Started:** Enter candidate details, paste or upload a JD (optional) and the interview transcript, then click "Analyze Transcript".')
-
 
 # =========================
 # Footer
