@@ -13,3 +13,4 @@ psycopg2-binary
 # --- Misc (small helper) ---
 typing_extensions
 
+reportlab
