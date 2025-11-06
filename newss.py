@@ -17,6 +17,47 @@ import pathlib
 import base64
 
 # =========================
+# PDF Reading Import (NEW)
+# =========================
+try:
+    from pdfminer.high_level import extract_text
+except ImportError:
+    st.info("Installing pdfminer.six for PDF reading...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pdfminer.six", "--quiet"])
+    from pdfminer.high_level import extract_text
+
+# =========================
+# PDF Generation (ReportLab) Imports
+# =========================
+def ensure_reportlab():
+    """Ensure reportlab is installed"""
+    try:
+        import reportlab
+        return True
+    except ImportError:
+        try:
+            st.info("📦 Installing reportlab for PDF generation...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "reportlab", "--quiet"])
+            return True
+        except Exception as e:
+            st.error(f"Failed to install reportlab: {e}")
+            return False
+
+# Call this once
+if ensure_reportlab():
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Image, HRFlowable, 
+        PageBreak, Table, TableStyle
+    )
+    from reportlab.lib.units import inch
+    from io import BytesIO
+else:
+    st.error("Failed to install ReportLab. PDF generation will not work.")
+
+# =========================
 # Page Config + Styles
 # =========================
 st.set_page_config(
@@ -138,6 +179,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =========================
+# PDF Upload Helper (NEW)
+# =========================
+def extract_pdf_text(uploaded_file):
+    """Extracts text from a Streamlit UploadedFile object (PDF)."""
+    try:
+        # Reset stream position just in case
+        uploaded_file.seek(0)
+        text = extract_text(uploaded_file)
+        return text
+    except Exception as e:
+        st.error(f"Error extracting text from PDF: {str(e)}")
+        return None
+
+# =========================
 # Runtime package helper
 # =========================
 def ensure_package(pkg_name: str, import_name: Optional[str] = None) -> bool:
@@ -154,9 +209,10 @@ def ensure_package(pkg_name: str, import_name: Optional[str] = None) -> bool:
             return False
 
 # =========================
-# .env & Config (Patched to force your keys unless overridden)
+# .env & Config
 # =========================
 ensure_package("python-dotenv", "dotenv")
+ensure_package("pdfminer.six", "pdfminer") # NEW: Ensure pdfminer is checked
 from dotenv import load_dotenv
 load_dotenv(override=True)  # allow .env to replace anything
 
@@ -190,6 +246,7 @@ defaults = {
     "jd_struct": None,
     "jd_eval": None,
     "use_jd": False,
+    "transcript_text": "", # NEW: Add this for the text area
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -1206,6 +1263,309 @@ def encode_image_base64(path: str) -> Optional[str]:
         return None
 
 # =========================
+# PDF Download Helper
+# =========================
+def build_interview_pdf_bytes(
+    logo_path: Optional[str],
+    candidate_name: str,
+    position: str,
+    timestamp: str,
+    analysis: str,
+    insights: Dict[str, Any],
+    chapters: List[Dict[str, Any]],
+    detailed_chapters: List[Dict[str, Any]],
+    action_items: List[str],
+    jd_eval: Optional[Dict[str, Any]] = None
+) -> bytes:
+    """Generate professional PDF report for interview analysis"""
+    
+    buff = BytesIO()
+    doc = SimpleDocTemplate(buff, pagesize=A4, leftMargin=45, rightMargin=45, topMargin=45, bottomMargin=45)
+    
+    # Define styles
+    styles = getSampleStyleSheet()
+    
+    title_style = ParagraphStyle(
+        "CustomTitle", parent=styles["Title"], fontSize=24,
+        textColor=colors.HexColor("#27549D"), alignment=1, spaceAfter=10
+    )
+    
+    subtitle_style = ParagraphStyle(
+        "CustomSubtitle", parent=styles["Heading2"], fontSize=14,
+        textColor=colors.HexColor("#0f1e33"), alignment=1, spaceAfter=20
+    )
+    
+    section_header_style = ParagraphStyle(
+        "SectionHeader", parent=styles["Heading2"], fontSize=16,
+        textColor=colors.HexColor("#27549D"), spaceAfter=10, spaceBefore=15
+    )
+    
+    subsection_style = ParagraphStyle(
+        "Subsection", parent=styles["Heading3"], fontSize=13,
+        textColor=colors.HexColor("#0f1e33"), spaceAfter=8
+    )
+    
+    body_style = ParagraphStyle(
+        "CustomBody", parent=styles["BodyText"], fontSize=10, leading=14, spaceAfter=8
+    )
+    
+    bullet_style = ParagraphStyle(
+        "BulletStyle", parent=styles["BodyText"], fontSize=10, leading=13, leftIndent=20, spaceAfter=5
+    )
+    
+    # Build document
+    story = []
+    
+    # Logo
+    if logo_path and Path(logo_path).exists():
+        try:
+            story.append(Image(logo_path, width=1*inch, height=1*inch)) # Adjusted size
+            story.append(Spacer(1, 10))
+        except Exception:
+            pass # Fail silently if logo fails
+    
+    # Header
+    story.append(Paragraph("Aspect AI Interview Analysis Report", title_style))
+    story.append(Paragraph("Comprehensive AI-Powered Interview Evaluation", subtitle_style))
+    story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#27549D")))
+    story.append(Spacer(1, 15))
+    
+    # Candidate Info Table
+    info_data = [
+        ["Candidate:", candidate_name or "—"],
+        ["Position:", position or "—"],
+        ["Analysis Date:", timestamp or "—"]
+    ]
+    
+    info_table = Table(info_data, colWidths=[1.5*inch, 4*inch])
+    info_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f0f4f8")),
+        ('TEXTCOLOR', (0, 0), (-1, -1), colors.HexColor("#0f1e33")),
+        ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
+        ('ALIGN', (1, 0), (1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 0), (-1, -1), 11),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e0")),
+        ('ROWBACKGROUNDS', (0, 0), (-1, -1), [colors.white, colors.HexColor("#f7fafc")])
+    ]))
+    
+    story.append(info_table)
+    story.append(Spacer(1, 20))
+    
+    # JD Match Score (if available)
+    if jd_eval and jd_eval.get("overall_score"):
+        overall_score = jd_eval.get("overall_score", 0) * 100
+        story.append(Paragraph("Job Description Alignment", section_header_style))
+        
+        score_data = [["Overall Match Score:", f"{overall_score:.1f}%"]]
+        
+        if jd_eval.get("buckets"):
+            buckets = jd_eval["buckets"]
+            score_data.extend([
+                ["Hard Skills:", f"{buckets.get('hard_skills', 0)*100:.1f}%"],
+                ["Soft Skills:", f"{buckets.get('soft_skills', 0)*100:.1f}%"],
+                ["Role Fit:", f"{buckets.get('role_fit', 0)*100:.1f}%"],
+                ["Experience Alignment:", f"{buckets.get('experience_alignment', 0)*100:.1f}%"]
+            ])
+        
+        score_table = Table(score_data, colWidths=[2.5*inch, 2*inch])
+        score_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#27549D")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#f7fafc")),
+            ('TEXTCOLOR', (0, 1), (-1, -1), colors.HexColor("#0f1e33")),
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ('ALIGN', (1, 0), (1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e0"))
+        ]))
+        
+        story.append(score_table)
+        story.append(Spacer(1, 15))
+        
+        # Gaps
+        gaps = jd_eval.get("gaps", [])
+        if gaps:
+            story.append(Paragraph("Identified Skill Gaps", subsection_style))
+            for gap in gaps:
+                story.append(Paragraph(f"• {gap}", bullet_style))
+            story.append(Spacer(1, 10))
+    
+    # AI Analysis Section
+    story.append(PageBreak())
+    story.append(Paragraph("Comprehensive AI Analysis", section_header_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
+    story.append(Spacer(1, 10))
+    
+    # Parse and render analysis sections
+    if analysis:
+        # Sanitize HTML-like markdown for PDF
+        clean_analysis = re.sub(r'<[^>]+>', '', analysis) 
+        
+        sections = clean_analysis.split("##")
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+            
+            lines = section.split("\n", 1)
+            if len(lines) > 1:
+                header, content = lines
+                story.append(Paragraph(header.strip().replace('*', ''), subsection_style))
+                
+                # Process content
+                for line in content.split("\n"):
+                    line = line.strip().replace('*', '')
+                    if not line:
+                        continue
+                    if line.startswith(("-", "•")):
+                        story.append(Paragraph(f"• {line.lstrip('-• ')}", bullet_style))
+                    else:
+                        story.append(Paragraph(line, body_style))
+                
+                story.append(Spacer(1, 10))
+            else:
+                story.append(Paragraph(section, body_style))
+    
+    # Skills Assessment
+    if insights:
+        story.append(PageBreak())
+        story.append(Paragraph("Skills Assessment", section_header_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
+        story.append(Spacer(1, 10))
+        
+        # Technical Skills
+        tech_skills = insights.get("technical_assessment", [])
+        if tech_skills:
+            story.append(Paragraph("Technical Competencies", subsection_style))
+            
+            tech_data = [["Skill/Topic", "Assessment", "Timestamp"]]
+            for skill in tech_skills[:10]:
+                tech_data.append([
+                    skill.get("topic", "—"),
+                    skill.get("result", "—"),
+                    skill.get("timestamp", "—")
+                ])
+            
+            tech_table = Table(tech_data, colWidths=[2.5*inch, 1.5*inch, 1*inch])
+            tech_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#27549D")),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+                ('TEXTCOLOR', (0, 1), (-1, -1), colors.HexColor("#0f1e33")),
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                ('ALIGN', (1, 1), (1, -1), 'CENTER'),
+                ('ALIGN', (2, 1), (2, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e0")),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7fafc")])
+            ]))
+            
+            story.append(tech_table)
+            story.append(Spacer(1, 15))
+        
+        # Soft Skills
+        soft_skills = insights.get("soft_skills", [])
+        if soft_skills:
+            story.append(Paragraph("Soft Skills & Behavioral Traits", subsection_style))
+            
+            soft_data = [["Skill", "Status", "Timestamp"]]
+            for skill in soft_skills[:10]:
+                soft_data.append([
+                    skill.get("skill", "—"),
+                    skill.get("status", "—"),
+                    skill.get("timestamp", "—")
+                ])
+            
+            soft_table = Table(soft_data, colWidths=[2.5*inch, 1.5*inch, 1*inch])
+            soft_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#27549D")),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+                ('TEXTCOLOR', (0, 1), (-1, -1), colors.HexColor("#0f1e33")),
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                ('ALIGN', (1, 1), (1, -1), 'CENTER'),
+                ('ALIGN', (2, 1), (2, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e0")),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7fafc")])
+            ]))
+            
+            story.append(soft_table)
+            story.append(Spacer(1, 15))
+    
+    # Detailed Chapters
+    if detailed_chapters:
+        story.append(PageBreak())
+        story.append(Paragraph("Interview Timeline & Chapters", section_header_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
+        story.append(Spacer(1, 10))
+        
+        for idx, chapter in enumerate(detailed_chapters[:8], 1):
+            story.append(Paragraph(
+                f"<b>{idx}. {chapter.get('title', 'Chapter')} ({chapter.get('timestamp', '—')} - {chapter.get('duration', '—')})</b>",
+                subsection_style
+            ))
+            
+            if chapter.get("summary"):
+                story.append(Paragraph(f"<b>Summary:</b> {chapter['summary']}", body_style))
+            
+            if chapter.get("key_points"):
+                story.append(Paragraph("<b>Key Points:</b>", body_style))
+                for point in chapter["key_points"][:5]:
+                    story.append(Paragraph(f"• {point}", bullet_style))
+            
+            story.append(Spacer(1, 10))
+    
+    # Action Items
+    if action_items:
+        story.append(PageBreak())
+        story.append(Paragraph("Recommended Next Steps", section_header_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
+        story.append(Spacer(1, 10))
+        
+        for idx, item in enumerate(action_items, 1):
+            story.append(Paragraph(f"{idx}. {item}", body_style))
+        
+        story.append(Spacer(1, 15))
+    
+    # JD Recommendation
+    if jd_eval and jd_eval.get("recommendation"):
+        story.append(Paragraph("Final Recommendation", section_header_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(jd_eval["recommendation"], body_style))
+        
+        if jd_eval.get("next_round_probes"):
+            story.append(Spacer(1, 10))
+            story.append(Paragraph("Suggested Follow-up Questions:", subsection_style))
+            for probe in jd_eval["next_round_probes"][:5]:
+                story.append(Paragraph(f"• {probe}", bullet_style))
+    
+    # Footer
+    story.append(Spacer(1, 20))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e0")))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(
+        "Generated by Aspect AI Interview Analyzer — Empowering data-driven hiring decisions",
+        ParagraphStyle("Footer", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#6b7280"), alignment=1)
+    ))
+    
+    # Build PDF
+    doc.build(story)
+    buff.seek(0)
+    return buff.read()
+
+
+# =========================
 # UI — Header & Banner (with logo)
 # =========================
 st.sidebar.markdown("### ")
@@ -1229,7 +1589,7 @@ st.markdown("\n".join(hero_parts), unsafe_allow_html=True)
 # =========================
 # Sidebar (config + search)
 # =========================
-st.sidebar.header("⚙️ Configuration (.env)")
+st.sidebar.header(" Configuration (.env)")
 # Runtime config preview (masked)
 st.sidebar.markdown("---")
 st.sidebar.subheader("Runtime Config (active)")
@@ -1314,6 +1674,9 @@ if st.sidebar.button("🔍 Search", key="search_button"):
                         st.session_state.position = data.get("position", "")
                         st.session_state.transcription = data.get("transcription", "")
                         st.session_state.analysis = data.get("analysis", "")
+                        # Load text into text areas for consistency
+                        st.session_state.transcript_text = data.get("transcription", "")
+                        
                         try:
                             ins = data.get("insights")
                             ch = data.get("chapters")
@@ -1323,11 +1686,25 @@ if st.sidebar.button("🔍 Search", key="search_button"):
                             st.session_state.chapters = ch if isinstance(ch, list) else json.loads(ch or "[]")
                             st.session_state.action_items = ai if isinstance(ai, list) else json.loads(ai or "[]")
                             st.session_state.detailed_chapters = dc if isinstance(dc, list) else json.loads(dc or "[]")
+                            
+                            # Also load JD text if it's in the insights blob
+                            jd_data = st.session_state.insights.get("jd", {})
+                            if jd_data and jd_data.get("competencies"):
+                                st.session_state.jd_struct = jd_data.get("competencies")
+                                st.session_state.jd_eval = jd_data.get("scores", {})
+                                st.session_state.jd_eval.update(jd_data.get("rec_and_probes", {}))
+                                # Note: We don't save the original JD text, so we can't fully restore it.
+                                # This is a limitation of the current save format.
+                                st.session_state.use_jd = True
+
                         except Exception:
                             st.session_state.insights = {}
                             st.session_state.chapters = []
                             st.session_state.action_items = []
                             st.session_state.detailed_chapters = []
+                            st.session_state.jd_struct = None
+                            st.session_state.jd_eval = None
+                            
                         ts = data.get("created_at", "")
                         st.session_state.timestamp = str(ts)
                         st.sidebar.success("✅ Loaded meeting into the app!")
@@ -1350,10 +1727,23 @@ with col2:
 if candidate_name and position:
     st.info(f"**Candidate Overview:** {candidate_name}, applying for a {position} position")
 
-# ==== 🧾 Paste JD ====
-st.markdown("### 🧾 Paste Job Description (JD)")
+# ==== 🧾 Paste JD (NOW WITH PDF UPLOAD) ====
+st.markdown("### 🧾 Paste or Upload Job Description (JD)")
+
+# PDF Uploader for JD
+jd_file = st.file_uploader("Upload JD as PDF", type="pdf", key="jd_uploader")
+if jd_file:
+    with st.spinner("Extracting JD text..."):
+        extracted_text = extract_pdf_text(jd_file)
+        if extracted_text:
+            st.session_state.jd_text = extracted_text
+            st.success("✅ JD text extracted from PDF!")
+            # Clear the uploader after processing
+            st.session_state.jd_uploader = None 
+            st.rerun() # Rerun to show text in text_area
+
 st.session_state.jd_text = st.text_area(
-    "Paste JD here (the system will extract must-haves, soft skills, years, responsibilities)",
+    "Paste JD here (or upload PDF above)",
     value=st.session_state.get("jd_text", ""),
     height=180,
     placeholder="Paste the JD text here…",
@@ -1363,13 +1753,27 @@ col_jd_toggle, _ = st.columns([1,3])
 with col_jd_toggle:
     st.session_state.use_jd = st.toggle(" Analyze with JD (JD-aware)", value=st.session_state.get("use_jd", False))
 
-# ==== 📄 Paste Transcript ====
-st.markdown("###  Paste Interview Transcript")
-st.session_state.setdefault("transcript_text", st.session_state.get("transcription", "") or "")
+# ==== 📄 Paste Transcript (NOW WITH PDF UPLOAD) ====
+st.markdown("### Transcript (Paste or Upload)")
 
+# PDF/Text Uploader for Transcript
+transcript_file = st.file_uploader("Upload Transcript as PDF or TXT", type=["pdf", "txt"], key="transcript_uploader")
+if transcript_file:
+    with st.spinner("Extracting transcript text..."):
+        if transcript_file.type == "application/pdf":
+            extracted_text = extract_pdf_text(transcript_file)
+        else: # TXT file
+            extracted_text = transcript_file.read().decode("utf-8")
+            
+        if extracted_text:
+            st.session_state.transcript_text = extracted_text
+            st.success("✅ Transcript text extracted from file!")
+            # Clear the uploader after processing
+            st.session_state.transcript_uploader = None
+            st.rerun() # Rerun to show text in text_area
 
 st.session_state.transcript_text = st.text_area(
-    "Paste transcript here",
+    "Paste transcript here (or upload above)",
     value=st.session_state.get("transcript_text", ""),
     height=260,
     placeholder="Paste the interview transcript text here…",
@@ -1813,9 +2217,99 @@ if st.session_state.transcription:
                 st.session_state.chat_history.append({"role": "assistant", "content": answer})
                 st.rerun()
 
+    
+    # Export Options Section
+    st.markdown("---")
+    st.markdown("### 📥 Export Options")
+
+    # This container is crucial for making the download button work after generation
+    download_container = st.container()
+
+    with download_container:
+        col_export1, col_export2, col_export3 = st.columns(3)
+
+        with col_export1:
+            if st.button("📄 Generate PDF Report", use_container_width=True, type="primary", key="btn_gen_pdf"):
+                with st.spinner("Generating PDF report..."):
+                    try:
+                        pdf_bytes = build_interview_pdf_bytes(
+                            logo_path=logo_path if logo_b64 else None,
+                            candidate_name=st.session_state.candidate_name,
+                            position=st.session_state.position,
+                            timestamp=st.session_state.timestamp,
+                            analysis=st.session_state.analysis,
+                            insights=st.session_state.insights or {},
+                            chapters=st.session_state.chapters or [],
+                            detailed_chapters=st.session_state.detailed_chapters or [],
+                            action_items=st.session_state.action_items or [],
+                            jd_eval=st.session_state.jd_eval
+                        )
+                        
+                        filename = f"Interview_Report_{st.session_state.candidate_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.pdf"
+                        
+                        # Store in session state to persist for the download button
+                        st.session_state.pdf_bytes = pdf_bytes
+                        st.session_state.pdf_filename = filename
+                        st.success("✅ PDF ready! Click Download.")
+                        
+                    except Exception as e:
+                        st.error(f"❌ PDF generation failed: {e}")
+                        st.info("Tip: Make sure reportlab is installed correctly")
+                        if "pdf_bytes" in st.session_state:
+                            del st.session_state.pdf_bytes
+            
+            # Show download button only if PDF bytes exist in session state
+            if "pdf_bytes" in st.session_state and st.session_state.pdf_bytes:
+                st.download_button(
+                    label="⬇️ Download PDF",
+                    data=st.session_state.pdf_bytes,
+                    file_name=st.session_state.pdf_filename,
+                    mime="application/pdf",
+                    use_container_width=True,
+                    on_click=lambda: st.session_state.pop("pdf_bytes", None) # Clear after download
+                )
+
+        with col_export2:
+            # Generate JSON data for the download button
+            export_data = {
+                "candidate_name": st.session_state.candidate_name,
+                "position": st.session_state.position,
+                "timestamp": st.session_state.timestamp,
+                "analysis": st.session_state.analysis,
+                "insights": st.session_state.insights,
+                "chapters": st.session_state.chapters,
+                "detailed_chapters": st.session_state.detailed_chapters,
+                "action_items": st.session_state.action_items,
+                "jd_evaluation": st.session_state.jd_eval
+            }
+            json_str = json.dumps(export_data, indent=2, ensure_ascii=False)
+            json_filename = f"Interview_Data_{st.session_state.candidate_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.json"
+
+            st.download_button(
+                label="📊 Export as JSON",
+                data=json_str,
+                file_name=json_filename,
+                mime="application/json",
+                use_container_width=True,
+                key="btn_dl_json"
+            )
+
+        with col_export3:
+            # Generate TXT data for the download button
+            txt_filename = f"Transcript_{st.session_state.candidate_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.txt"
+            
+            st.download_button(
+                label="📝 Export Transcript",
+                data=st.session_state.transcription,
+                file_name=txt_filename,
+                mime="text/plain",
+                use_container_width=True,
+                key="btn_dl_txt"
+            )
+
 else:
     st.markdown("---")
-    st.info('👆 **Get Started:** Enter candidate details, paste a JD (optional) and the interview transcript, then click "Analyze Transcript".')
+    st.info('👆 **Get Started:** Enter candidate details, paste or upload a JD (optional) and the interview transcript, then click "Analyze Transcript".')
 
 
 # =========================
